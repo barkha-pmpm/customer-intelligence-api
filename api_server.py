@@ -320,6 +320,15 @@ def get_customer_financials(
 )
 def get_summary(
     domain: str = Query(..., description="Domain: financial | transaction | delivery"),
+    metrics: Optional[str] = Query(None, description=(
+        "Comma-separated metrics to return. Leave empty for all. "
+        "Financial options: outstanding | overdue | overdue_buckets | credit_limit | available_limit | "
+        "unused_credits | vendor_payout | business_volume_ytd | business_volume_mtd | "
+        "ytd_collections | mtd_collections | payment_count | pending_so_count | pending_so_value | "
+        "avg_dso | avg_rating | customer_count. "
+        "Transaction options: count | total_amount | total_balance | attributed_amount | unattributed_amount. "
+        "Delivery options: count | total_quantity."
+    )),
     type: Optional[str] = Query(None, description="For transaction domain: invoice | receipt | sales_order"),
     region: Optional[str] = Query(None, description="Filter by region: North | South | East | West"),
     bu_head: Optional[str] = Query(None, description="Filter by BU head name (partial match)"),
@@ -386,7 +395,12 @@ def get_summary(
             grouped = grouped.fillna(0)
             records = grouped.to_dict(orient="records")
 
-            if sort_by and sort_by in grouped.columns:
+            # Filter to only requested metrics
+            if metrics:
+                wanted = [m.strip() for m in metrics.split(",")]
+                records = [{group_by: r[group_by], **{k: v for k, v in r.items() if k in wanted}} for r in records]
+
+            if sort_by:
                 records = sorted(records, key=lambda x: x.get(sort_by, 0), reverse=(order != "asc"))
             if limit:
                 records = records[:limit]
@@ -394,34 +408,41 @@ def get_summary(
             return {"status": "success", "domain": domain, "grouped_by": group_by,
                     "count": len(records), "data": records}
 
-        # Overall portfolio summary
-        result = {
+        # Overall portfolio summary — build full result then filter
+        full_result = {
             "total_customers":        len(df),
             "active_customers":       int(df["is_active"].sum()),
-            "total_outstanding":      safe_int(df["outstanding"].sum()),
-            "total_overdue":          safe_int(df["overdue"].sum()),
+            "outstanding":            safe_int(df["outstanding"].sum()),
+            "overdue":                safe_int(df["overdue"].sum()),
             "overdue_buckets": {
                 "0_30_days":          safe_int(df["overdue_0_30"].sum()),
                 "31_60_days":         safe_int(df["overdue_31_60"].sum()),
                 "61_90_days":         safe_int(df["overdue_61_90"].sum()),
                 "90_plus_days":       safe_int(df["overdue_90_plus"].sum()),
             },
-            "total_credit_limit":     safe_int(df["credit_limit"].sum()),
-            "total_available_limit":  safe_int(df["available_limit"].sum()),
-            "total_unused_credits":   safe_int(df["unused_credits"].sum()),
-            "total_vendor_payout":    safe_int(df["vendor_payout"].sum()),
-            "total_business_ytd":     safe_int(df["business_volume_ytd"].sum()),
-            "total_business_mtd":     safe_int(df["business_volume_mtd"].sum()),
-            "total_collections_ytd":  safe_int(df["ytd_collections"].sum()),
-            "total_collections_mtd":  safe_int(df["mtd_collections"].sum()),
-            "total_pending_so_value": safe_int(df["pending_so_value"].sum()),
+            "credit_limit":           safe_int(df["credit_limit"].sum()),
+            "available_limit":        safe_int(df["available_limit"].sum()),
+            "unused_credits":         safe_int(df["unused_credits"].sum()),
+            "vendor_payout":          safe_int(df["vendor_payout"].sum()),
+            "business_volume_ytd":    safe_int(df["business_volume_ytd"].sum()),
+            "business_volume_mtd":    safe_int(df["business_volume_mtd"].sum()),
+            "ytd_collections":        safe_int(df["ytd_collections"].sum()),
+            "mtd_collections":        safe_int(df["mtd_collections"].sum()),
+            "pending_so_count":       safe_int(df["pending_so_count"].sum()),
+            "pending_so_value":       safe_int(df["pending_so_value"].sum()),
+            "payment_count":          safe_int(df["payment_count"].sum()),
             "avg_dso":                safe_float(df["dso"].mean(), 1),
             "avg_rating":             safe_float(df["rating"].mean(), 2),
-            "top_customers_by_outstanding": (
-                df.nlargest(10, "outstanding")[["customer_id", "name", "outstanding", "overdue", "dso", "rating"]]
-                  .fillna(0).to_dict(orient="records")
-            ),
         }
+
+        if metrics:
+            wanted = [m.strip() for m in metrics.split(",")]
+            result = {k: v for k, v in full_result.items() if k in wanted}
+            if "overdue_buckets" in wanted:
+                result["overdue_buckets"] = full_result["overdue_buckets"]
+        else:
+            result = full_result
+
         return {"status": "success", "domain": domain, "filters": {"region": region, "bu_head": bu_head, "platform": platform}, "data": result}
 
     # ── TRANSACTION ─────────────────────────────────────────────
@@ -471,11 +492,11 @@ def get_summary(
             return {"status": "success", "domain": domain, "type": type_, "grouped_by": group_by,
                     "count": len(grouped), "data": grouped.to_dict(orient="records")}
 
-        result: dict = {"total_count": len(df), "total_amount": safe_int(df["amount"].sum())}
+        full_result: dict = {"count": len(df), "total_amount": safe_int(df["amount"].sum())}
 
         if type_ == "invoice":
-            result["total_balance"]  = safe_int(df["balance"].sum())
-            result["by_status"]      = (
+            full_result["total_balance"] = safe_int(df["balance"].sum())
+            full_result["by_status"]     = (
                 df.groupby("status")["amount"]
                   .agg(count="count", total_amount="sum")
                   .reset_index().to_dict(orient="records")
@@ -483,19 +504,25 @@ def get_summary(
         elif type_ == "receipt":
             attrib = df[df["is_attributed"] == True]  if "is_attributed" in df.columns else df.iloc[0:0]
             unattr = df[df["is_attributed"] == False] if "is_attributed" in df.columns else df.iloc[0:0]
-            result["attributed_amount"]   = safe_int(attrib["amount"].sum())
-            result["unattributed_amount"] = safe_int(unattr["amount"].sum())
-            result["by_payment_mode"]     = (
+            full_result["attributed_amount"]   = safe_int(attrib["amount"].sum())
+            full_result["unattributed_amount"] = safe_int(unattr["amount"].sum())
+            full_result["by_payment_mode"]     = (
                 df.groupby("payment_mode")["amount"]
                   .agg(count="count", total_amount="sum")
                   .reset_index().to_dict(orient="records")
             )
         elif type_ in ("sales_order", "so"):
-            result["by_status"] = (
+            full_result["by_status"] = (
                 df.groupby("status")["amount"]
                   .agg(count="count", total_amount="sum")
                   .reset_index().to_dict(orient="records")
             )
+
+        if metrics:
+            wanted = [m.strip() for m in metrics.split(",")]
+            result = {k: v for k, v in full_result.items() if k in wanted}
+        else:
+            result = full_result
 
         return {"status": "success", "domain": domain, "type": type_, "data": result}
 
@@ -525,13 +552,20 @@ def get_summary(
             return {"status": "success", "domain": domain, "grouped_by": group_by,
                     "count": len(grouped), "data": grouped.to_dict(orient="records")}
 
-        result = {
+        full_result = {
             "total_deliveries": len(df),
             "total_quantity":   safe_int(df["quantity"].sum()),
             "by_status":        df.groupby("status")["delivery_id"].count().to_dict(),
             "by_delivery_type": df.groupby("delivery_type")["delivery_id"].count().to_dict(),
             "by_uom":           df.groupby("uom")["quantity"].sum().apply(safe_int).to_dict(),
         }
+
+        if metrics:
+            wanted = [m.strip() for m in metrics.split(",")]
+            result = {k: v for k, v in full_result.items() if k in wanted}
+        else:
+            result = full_result
+
         return {"status": "success", "domain": domain, "data": result}
 
     else:
