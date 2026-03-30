@@ -587,6 +587,11 @@ def get_summary(
 )
 def get_transactions(
     type: str = Query(..., description="Transaction type: invoice | receipt | sales_order"),
+    metrics: Optional[str] = Query(None, description=(
+        "Comma-separated summary metrics to return instead of full records. "
+        "Options: count | total_amount | total_balance | attributed_amount | unattributed_amount. "
+        "When set, only the summary is returned — no individual records."
+    )),
     customer_id: Optional[str] = Query(None, description="Filter by customer ID – e.g. CUST001"),
     status: Optional[str] = Query(None, description="Invoice status: Paid | Pending | Overdue | Partial  |  SO status: Confirmed | Cancelled | Delivered | Pending"),
     is_attributed: Optional[bool] = Query(None, description="For receipts: true = attributed, false = unattributed"),
@@ -641,23 +646,32 @@ def get_transactions(
 
     df = clean_df(df)
 
-    # Summary stats appended
-    summary = {
-        "total_count":  len(df),
+    # Build full summary
+    full_summary = {
+        "count":        len(df),
         "total_amount": safe_int(df["amount"].sum()),
     }
     if type_ == "invoice" and "balance" in df.columns:
-        summary["total_balance"] = safe_int(df["balance"].sum())
+        full_summary["total_balance"] = safe_int(df["balance"].sum())
     if type_ == "receipt" and "is_attributed" in df.columns:
-        summary["attributed_amount"]   = safe_int(df[df["is_attributed"] == True]["amount"].sum())
-        summary["unattributed_amount"] = safe_int(df[df["is_attributed"] == False]["amount"].sum())
+        full_summary["attributed_amount"]   = safe_int(df[df["is_attributed"] == True]["amount"].sum())
+        full_summary["unattributed_amount"] = safe_int(df[df["is_attributed"] == False]["amount"].sum())
+
+    # If metrics requested → return only those summary fields, no records
+    if metrics:
+        wanted = [m.strip() for m in metrics.split(",")]
+        return {
+            "status":  "success",
+            "type":    type_,
+            "data":    {k: v for k, v in full_summary.items() if k in wanted},
+        }
 
     return {
-        "status":   "success",
-        "type":     type_,
-        "summary":  summary,
-        "count":    len(df),
-        "data":     df.to_dict(orient="records"),
+        "status":  "success",
+        "type":    type_,
+        "summary": full_summary,
+        "count":   len(df),
+        "data":    df.to_dict(orient="records"),
     }
 
 
@@ -676,6 +690,11 @@ def get_transactions(
     ),
 )
 def get_deliveries(
+    metrics: Optional[str] = Query(None, description=(
+        "Comma-separated summary metrics to return instead of full records. "
+        "Options: count | total_quantity | by_status | by_type | by_uom. "
+        "When set, only the summary is returned — no individual records."
+    )),
     customer_id: Optional[str] = Query(None, description="Filter by customer ID"),
     order_id: Optional[str] = Query(None, description="Filter by order ID"),
     status: Optional[str] = Query(None, description="Delivery status: Completed | In-Transit"),
@@ -728,17 +747,25 @@ def get_deliveries(
 
     df = clean_df(df)
 
-    summary = {
-        "total_deliveries": len(df),
-        "total_quantity":   safe_int(df["quantity"].sum()),
-        "by_status":        df.groupby("status")["delivery_id"].count().to_dict() if not df.empty else {},
-        "by_type":          df.groupby("delivery_type")["delivery_id"].count().to_dict() if not df.empty else {},
-        "by_uom":           df.groupby("uom")["quantity"].sum().apply(safe_int).to_dict() if not df.empty else {},
+    full_summary = {
+        "count":          len(df),
+        "total_quantity": safe_int(df["quantity"].sum()),
+        "by_status":      df.groupby("status")["delivery_id"].count().to_dict() if not df.empty else {},
+        "by_type":        df.groupby("delivery_type")["delivery_id"].count().to_dict() if not df.empty else {},
+        "by_uom":         df.groupby("uom")["quantity"].sum().apply(safe_int).to_dict() if not df.empty else {},
     }
+
+    # If metrics requested → return only those summary fields, no records
+    if metrics:
+        wanted = [m.strip() for m in metrics.split(",")]
+        return {
+            "status": "success",
+            "data":   {k: v for k, v in full_summary.items() if k in wanted},
+        }
 
     return {
         "status":  "success",
-        "summary": summary,
+        "summary": full_summary,
         "count":   len(df),
         "data":    df.to_dict(orient="records"),
     }
